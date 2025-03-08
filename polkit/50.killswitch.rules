@@ -1,0 +1,9 @@
+// 50.killswitch.rules - Polkit rule for Linux Kill Switch
+polkit.addRule(function(action, subject) {
+    // Grant permission to run the kill switch without prompting if:
+    // - The action id matches our defined identifier.
+    // - And the subject belongs to a specific group (e.g., "wheel" or "sudo").
+    if (action.id == "org.kde.killswitch.run" && subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});
