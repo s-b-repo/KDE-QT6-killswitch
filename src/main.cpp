@@ -16,7 +16,11 @@
 #include <QNetworkInterface>
 #include <QFileInfo>
 #include <QDir>
+#include <QCloseEvent>
+#include <QIcon>
 #include <QDebug>
+#include <QtConcurrent>
+#include <QFutureWatcher>
 #include <unistd.h>  // for geteuid()
 
 #include <vector>
@@ -28,7 +32,7 @@ class KillSwitchWindow : public QMainWindow {
     Q_OBJECT
 public:
     KillSwitchWindow(QWidget *parent = nullptr)
-        : QMainWindow(parent), killSwitchEnabled(false) {
+        : QMainWindow(parent), killSwitchEnabled(false), checkInProgress(false), consecutiveFailures(0) {
         setupUI();
         setupTrayIcon();
         setupTimer();
@@ -42,6 +46,9 @@ private:
     QTimer *checkTimer;
     QSystemTrayIcon *trayIcon;
     bool killSwitchEnabled;
+    bool checkInProgress;
+    int consecutiveFailures;
+    static constexpr int kMaxConsecutiveFailures = 3;
 
     // Predefined lists for DNS servers and popular websites.
     std::vector<QString> dnsServers = {"8.8.8.8", "1.1.1.1", "208.67.222.222"};
@@ -131,6 +138,7 @@ private slots:
         killSwitchEnabled = checked;
         if (killSwitchEnabled) {
             toggleButton->setText("Kill Switch ON");
+            consecutiveFailures = 0;
             checkTimer->start();
         } else {
             toggleButton->setText("Kill Switch OFF");
@@ -138,43 +146,61 @@ private slots:
         }
     }
 
-    // Check connectivity to a randomly selected DNS server and website.
     void performConnectivityCheck() {
-        if (!killSwitchEnabled)
+        if (!killSwitchEnabled || checkInProgress)
             return;
 
-        // First, verify that a local network is available.
         if (!localNetworkAvailable()) {
-            triggerShutdown("Local network unavailable");
+            handleCheckResult(false, false, "Local network unavailable");
             return;
         }
 
-        // Randomly select one DNS server and one website.
-        QString dns = dnsServers.at(QRandomGenerator::global()->bounded(dnsServers.size()));
-        QString site = websites.at(QRandomGenerator::global()->bounded(websites.size()));
+        QString dns = dnsServers.at(QRandomGenerator::global()->bounded(static_cast<quint32>(dnsServers.size())));
+        QString site = websites.at(QRandomGenerator::global()->bounded(static_cast<quint32>(websites.size())));
 
-        bool dnsOk = checkHost(dns, 53);
-        bool siteOk = checkHost(site, 80);
+        checkInProgress = true;
+        auto *watcher = new QFutureWatcher<QPair<bool, bool>>(this);
+        connect(watcher, &QFutureWatcher<QPair<bool, bool>>::finished, this, [this, watcher]() {
+            auto result = watcher->result();
+            handleCheckResult(result.first, result.second, "Connectivity lost: DNS and website unreachable");
+            checkInProgress = false;
+            watcher->deleteLater();
+        });
 
-        // If both tests fail and no blocking operations are active, trigger shutdown.
+        watcher->setFuture(QtConcurrent::run([this, dns, site]() -> QPair<bool, bool> {
+            return {checkHost(dns, 53), checkHost(site, 80)};
+        }));
+    }
+
+    void handleCheckResult(bool dnsOk, bool siteOk, const QString &reason) {
         if (!dnsOk && !siteOk) {
-            if (!fileOperationCheck->isChecked() && !upgradeCheck->isChecked()) {
-                triggerShutdown("Connectivity lost: DNS and website unreachable");
+            consecutiveFailures++;
+            if (consecutiveFailures >= kMaxConsecutiveFailures) {
+                if (!fileOperationCheck->isChecked() && !upgradeCheck->isChecked()) {
+                    triggerShutdown(reason);
+                } else {
+                    qDebug() << "Connectivity lost but pending operations active. Shutdown delayed.";
+                }
             } else {
-                qDebug() << "Connectivity lost but pending operations active. Shutdown delayed.";
+                qDebug() << "Connectivity check failed (" << consecutiveFailures << "/" << kMaxConsecutiveFailures << ")";
             }
+        } else {
+            consecutiveFailures = 0;
         }
-
-        // Reset timer interval randomly between 5 and 10 seconds.
         int interval = QRandomGenerator::global()->bounded(5000, 10000);
         checkTimer->setInterval(interval);
     }
 
-    // Execute the shutdown command.
     void triggerShutdown(const QString &reason) {
         qDebug() << "Triggering shutdown due to:" << reason;
-        // This command requires root privileges. Adjust according to your system.
-        QProcess::startDetached("shutdown", QStringList() << "-h" << "now");
+        qint64 pid;
+        bool ok = QProcess::startDetached("shutdown", QStringList() << "-h" << "now", QString(), &pid);
+        if (!ok) {
+            qWarning() << "shutdown command failed, trying poweroff";
+            ok = QProcess::startDetached("poweroff", QStringList(), QString(), &pid);
+            if (!ok)
+                qCritical() << "All shutdown methods failed";
+        }
     }
 
     // Handle tray icon activation to show/hide the window.
@@ -195,6 +221,8 @@ protected:
         if (trayIcon->isVisible()) {
             hide();
             event->ignore();
+        } else {
+            QMainWindow::closeEvent(event);
         }
     }
 };
@@ -207,14 +235,18 @@ protected:
 int main(int argc, char *argv[]) {
     // Check if the process is running as root.
     if(geteuid() != 0) {
-        QString program = QCoreApplication::applicationFilePath();
+        QString program = QString::fromLocal8Bit(argv[0]);
         QStringList args;
         for (int i = 1; i < argc; ++i)
-            args << argv[i];
+            args << QString::fromLocal8Bit(argv[i]);
 
-        // Relaunch via pkexec to prompt for admin password.
-        QProcess::startDetached("pkexec", QStringList() << program << args);
-        return 0; // Exit the non-privileged instance.
+        qint64 pid;
+        bool ok = QProcess::startDetached("pkexec", QStringList() << program << args, QString(), &pid);
+        if (!ok) {
+            qCritical() << "Failed to relaunch with pkexec — is polkit installed?";
+            return 1;
+        }
+        return 0;
     }
 
     // Running as root, launch the application.

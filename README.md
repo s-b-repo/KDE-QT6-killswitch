@@ -1,212 +1,157 @@
-# KDE KillSwitch Daemon
+# KDE-QT6-killswitch
 
-**A robust and secure connectivity kill switch daemon for Linux KDE environments.**
+A Qt6-based connectivity kill switch for Linux. Monitors your internet
+connection in real time and triggers an immediate system shutdown when
+connectivity is lost, protecting against unintended network exposure.
 
-A lightweight, Qt6-based daemon that continuously monitors your system's connectivity. If connectivity to critical endpoints is lost—and no important operations (like file transfers or system upgrades) are in progress—the daemon triggers an immediate shutdown. Designed to integrate seamlessly into KDE environments, it offers a modern GUI, system tray functionality, and automatic administrative elevation via pkexec.
+## How it works
 
----
+When the kill switch is enabled the daemon runs a connectivity check every
+5-10 seconds (randomised). Each check:
 
+1. Verifies that at least one non-loopback network interface is up.
+2. Attempts a TCP connection to a randomly chosen DNS server (port 53).
+3. Attempts a TCP connection to a randomly chosen website (port 80).
 
-## Overview
+If both the DNS and website checks fail for **3 consecutive cycles**, and no
+blocking conditions are active, the daemon calls `shutdown -h now` (falling
+back to `poweroff` if that fails).
 
-The **KDE KillSwitch Daemon** is engineered to enhance system security by monitoring internet connectivity in real time. The daemon performs connectivity tests at random intervals (between 5 and 10 seconds) against a set of predefined DNS servers and popular websites. If both tests fail and no critical operations are in progress, it initiates an immediate shutdown. 
+Connectivity checks run in a background thread so the GUI never blocks.
 
-The application features:
-- A modern, KDE-styled UI with both light and dark theme options.
-- A system tray integration that allows the daemon to run seamlessly in the background.
-- Automatic elevation to root privileges using `pkexec`, with the potential for persistent administration via Polkit rules.
+### Blocking conditions
 
----
+Two checkboxes let you prevent shutdown while critical work is in progress:
 
-## Features
+- **File Operation in Progress** — e.g. large transfers.
+- **System Upgrade/Installation in Progress** — e.g. package manager running.
 
-- **Real-Time Connectivity Monitoring:**  
-  Randomly verifies connectivity to multiple critical endpoints (DNS servers and websites) every 5–10 seconds.
+While either is checked, failed connectivity is logged but shutdown is deferred.
 
-- **Daemon Mode & System Tray Support:**  
-  Runs in the background with a system tray icon for quick access and control.
+## Dependencies
 
-- **Administrative Elevation:**  
-  Automatically re-launches with root privileges via `pkexec` if not already elevated.  
-  Optionally, use Polkit rules to avoid repeated password prompts.
+- **Qt 6** — Widgets, Network, and Concurrent modules.
+- **polkit / pkexec** — for privilege elevation.
+- **Linux** — uses `shutdown`/`poweroff` and `geteuid()`.
 
-- **Prevent Shutdown Conditions:**  
-  Checklist options to prevent shutdown during file operations or system upgrades.
+On Debian/Ubuntu:
 
-- **KDE Integration:**  
-  Designed to match KDE aesthetics with a modern, intuitive GUI and native system tray behavior.
+```
+sudo apt install qt6-base-dev libqt6concurrent6 policykit-1
+```
 
-- **Customizable:**  
-  Easily configure endpoints, timer intervals, and UI themes by modifying the source.
+On Fedora:
 
----
+```
+sudo dnf install qt6-qtbase-devel polkit
+```
+
+On Arch:
+
+```
+sudo pacman -S qt6-base polkit
+```
+
+## Building
+
+```sh
+git clone https://github.com/s-b-repo/KDE-QT6-killswitch.git
+cd KDE-QT6-killswitch
+mkdir build && cd build
+cmake ..
+make
+```
+
+The resulting binary is `build/KDE-QT6-killswitch`.
 
 ## Installation
 
-### Building with QMake
+From the build directory:
 
-1. **Clone the Repository:**
+```sh
+sudo make install
+```
 
-   ```
-   git clone https://github.com/s-b-repo/KDE-QT6-killswitch.git
-   cd kde-killswitch-daemon
-   ```
+This installs:
 
-2. **Generate Project File and Build:**
-
-   ```
-   qmake -project
-   qmake
-   make
-   ```
-
-3. **Run the Application:**
-
-   ```
-   ./kde-killswitch-daemon
-   ```
-
-### Building with CMake
-
-1. **Clone the Repository:**
-
-   ```
-   git clone https://github.com/s-b-repo/KDE-QT6-killswitch.git
-   cd kde-killswitch-daemon
-   ```
-
-2. **Create a Build Directory:**
-
-   ```
-   mkdir build && cd build
-   ```
-
-3. **Run CMake and Build:**
-
-   ```
-   cmake ..
-   make
-   ```
-
-4. **Run the Application:**
-
-   ```
-   ./kde-killswitch-daemon
-   ```
-
-### Dependencies
-
-- **Qt6:** Used for the GUI, networking, and timer functionalities.
-- **KDE Frameworks (Optional):** For deeper KDE integration.
-- **Polkit & pkexec:** For administrative elevation.
-- **Linux Standard Utilities:** Ensure availability of the `shutdown` command.
-
----
+| File | Destination |
+|------|-------------|
+| `KDE-QT6-killswitch` | `/usr/local/bin/` |
+| `resources/` | `/usr/local/share/KDE-QT6-killswitch/resources/` |
+| `50.killswitch.rules` | `/usr/local/share/polkit-1/rules.d/` |
+| `org.kde.killswitch.policy` | `/usr/local/share/polkit-1/actions/` |
 
 ## Usage
 
-- **Launching the Application:**  
-  On first launch, if not run as root, the application will automatically re-launch using `pkexec` to prompt for administrative credentials.
+```sh
+./KDE-QT6-killswitch
+```
 
-- **Activating the Kill Switch:**  
-  Toggle the on-screen switch to enable or disable the kill switch functionality.
+If not running as root, the application automatically re-launches itself via
+`pkexec` and prompts for your password. Root is required because the shutdown
+command needs elevated privileges.
 
-- **Prevent Shutdown During Critical Operations:**  
-  Use the provided checkboxes to delay a shutdown during file transfers or system upgrades.
+Once running:
 
-- **System Tray Integration:**  
-  The application minimizes to the system tray. A left-click on the tray icon will restore or hide the window, and a context menu provides options to restore or quit.
+- Click **Kill Switch ON** to start monitoring.
+- Click **Kill Switch OFF** to stop.
+- Close the window to minimise to the system tray.
+- Right-click the tray icon for **Restore** / **Quit**.
 
----
+## Polkit configuration
 
-## Administration and Polkit Integration
+Two files handle privilege management:
 
-To ensure the application runs with elevated privileges without prompting for a password on every launch, you can configure Polkit:
+### Policy file (`org.kde.killswitch.policy`)
 
-1. **Create a Polkit Rule:**
+Defines the `org.kde.killswitch.run` action and associates it with the
+installed binary path. This is what tells pkexec which action ID to use
+instead of the generic `org.freedesktop.policykit.exec`.
 
-   Create a file at `/etc/polkit-1/rules.d/50.kde-killswitch.rules` with the following content:
+### Rules file (`50.killswitch.rules`)
 
-   ```js
-   polkit.addRule(function(action, subject) {
-       if (action.id == "org.kde.killswitch.run" && subject.isInGroup("yourGroupName")) {
-           return polkit.Result.YES;
-       }
-   });
-   ```
+Grants automatic authorisation to users in the `sudo` group so they are not
+prompted for a password on every launch. Edit the group name if your system
+uses a different admin group (e.g. `wheel`):
 
-2. **Create a Policy File:**
-
-   Place a policy file (e.g., `org.kde.killswitch.policy`) in `/usr/share/polkit-1/actions/` to define the action `org.kde.killswitch.run`.
-
-3. **Security Considerations:**  
-   Persistent elevation should be managed with caution. Ensure that only trusted users or groups are granted this privilege.
-
----
+```js
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.kde.killswitch.run" && subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
+```
 
 ## Configuration
 
-- **Endpoints:**  
-  Modify the list of DNS servers and websites in the source code to suit your network environment:
+All configuration is currently in the source code. Key values in
+`src/main.cpp`:
 
-  ```cpp
-  std::vector<QString> dnsServers = {"8.8.8.8", "1.1.1.1", "208.67.222.222"};
-  std::vector<QString> websites = {"www.google.com", "www.amazon.com", "www.wikipedia.org"};
-  ```
+| Setting | Default | Location |
+|---------|---------|----------|
+| DNS servers | `8.8.8.8`, `1.1.1.1`, `208.67.222.222` | `dnsServers` vector |
+| Websites | `google.com`, `amazon.com`, `wikipedia.org` | `websites` vector |
+| Check interval | 5000-10000 ms (random) | `QRandomGenerator::bounded()` calls |
+| Connection timeout | 3000 ms | `checkHost()` timeout parameter |
+| Consecutive failures before shutdown | 3 | `kMaxConsecutiveFailures` |
 
-- **Timer Settings:**  
-  The timer interval is randomized between 5 and 10 seconds. Adjust these values in the source code if needed.
+## Project structure
 
-- **UI Themes:**  
-  The default stylesheet is set to a light theme. Enhance the application by adding a dark theme option through additional stylesheet settings.
-
----
-
-## Architecture and Code Overview
-
-- **Main Components:**
-  - **KillSwitchWindow:**  
-    The central UI component that handles connectivity checks, system tray integration, and shutdown triggers.
-  
-  - **Admin Elevation:**  
-    The main function checks for root privileges using `geteuid()` and relaunches with `pkexec` if needed.
-  
-  - **Connectivity Checker:**  
-    Uses TCP socket connections to verify access to key endpoints and triggers a shutdown if both checks fail.
-  
-  - **System Tray Integration:**  
-    Allows the application to run in the background while providing a convenient interface via a tray icon.
-
-- **Code Structure:**
-  - **main.cpp:** Contains the complete implementation, including UI setup, connectivity checks, admin elevation, and system tray handling.
-  - **UI Elements:** Utilizes Qt Widgets for a modern, KDE-friendly interface.
-  - **Network Operations:** Uses Qt's networking modules for reliable connectivity testing.
-  - **Shutdown Mechanism:** Leverages QProcess to execute the `shutdown -h now` command, requiring appropriate system privileges.
-
----
-
-## Contributing
-
-Contributions are welcome! .
-
----
+```
+.
+├── CMakeLists.txt
+├── CHANGELOG.md
+├── LICENSE
+├── README.md
+├── polkit/
+│   ├── 50.killswitch.rules        # Polkit rules for passwordless launch
+│   └── org.kde.killswitch.policy   # Polkit policy defining the action ID
+├── resources/
+│   └── icon.png                    # System tray icon
+└── src/
+    └── main.cpp                    # Complete application source
+```
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). See the LICENSE file for full details.
-
----
-
-## Acknowledgments
-
-- **Qt Community:** For providing a robust framework and extensive documentation.
-- **KDE Developers:** For the inspiration and continuous improvements in the KDE ecosystem.
-- **Freedesktop.org:** For tools such as Polkit that enable secure privilege management.
-
----
-
-This README aims to provide a comprehensive guide to the KDE KillSwitch Daemon. Feedback and contributions are highly appreciated. Let’s work together to enhance system security in KDE environments!
-
----
-
-Feel free to adjust any sections to better suit your project’s specifics or the needs of the KDE community. Enjoy coding!
+[MIT](LICENSE) — Copyright (c) 2025 S.B
